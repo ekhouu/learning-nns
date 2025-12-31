@@ -2,6 +2,7 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 /* my goal here is generally to just write a functional nn but w/ nothing fancy,
@@ -23,11 +24,11 @@
 
 // LIB
 
-void populateWeights(std::vector<float> &weights, size_t num_inputs,
+void populateWeights(std::vector<double> &weights, size_t num_inputs,
                      std::mt19937 &rng) {
   weights.resize(num_inputs);
-  float s = 1.f / std::sqrt((float)num_inputs);
-  std::uniform_real_distribution<float> dist(-1.f, 1.f);
+  double s = 1.0 / std::sqrt((double)num_inputs);
+  std::uniform_real_distribution<double> dist(-1.0, 1.0);
 
   for (auto &w : weights)
     w = dist(rng) * s;
@@ -35,20 +36,15 @@ void populateWeights(std::vector<float> &weights, size_t num_inputs,
 
 struct Neuron {
   // should be width of prev layer
-  std::vector<float> weights;
+  std::vector<double> weights;
   // boundary : w*x + b
   double bias;
-  // temp --> move to layer
-  double a, z, delta;
 
-  Neuron(size_t num_inputs, std::mt19937 &rng,
-         double b, /* TODO: remove a,z,delta and move to layer*/
-         double a, double z, double delta)
-      : bias{b} {
+  Neuron(size_t num_inputs, std::mt19937 &rng, double b) : bias{b} {
     populateWeights(weights, num_inputs, rng);
   };
 
-  const void debug_weights() {
+  void debug_weights() const {
     for (auto &w : weights) {
       std::cout << std::setw(8) << w;
     }
@@ -60,16 +56,22 @@ struct Layer {
   size_t width;
 
   // z = \sum_i (w_i x_i) + b (affine)
-  // TODO: move from neuron to layer
-  // std::vector<double> a, z, deltas;
+  std::vector<double> a, z, deltas;
 
   Layer(size_t w, size_t prev, std::mt19937 &rng) : width{w} {
-    for (int i = 0; i < w; i++) {
-      neurons.push_back(Neuron(prev, rng, 0.00, 0.00, 0.00, 0.00));
+    for (size_t i = 0; i < w; i++) {
+      neurons.push_back(Neuron(prev, rng, 0.00));
     }
+
+    // aside: look into changing inital values of a,z,deltas;
+    // for now just keeping them at 0, dont think theyre important
+    // since they get redone every time anyway
+    a.resize(w, 0);
+    z.resize(w, 0);
+    deltas.resize(w, 0);
   }
 
-  const void debug() {
+  void debug() const {
     for (auto &n : neurons) {
       std::cout << std::setw(3) << "{";
       n.debug_weights();
@@ -78,11 +80,50 @@ struct Layer {
   }
 };
 
+struct LayerConfig {
+  size_t width;
+};
+
+struct NetworkConfig {
+  std::vector<LayerConfig> layers;
+  size_t input_size;
+  size_t layer_count;
+
+  NetworkConfig(size_t in_size, std::vector<LayerConfig> l)
+      : layers{l}, input_size{in_size} {
+    layer_count = layers.size();
+  }
+};
+
+/* NETWORK INITIALIZER FORMAT
+ * Network (
+ *   {
+ *      { layer_width }
+ *      TODO: finish transferring neuron stuff to layer
+ *      then we can populate this
+ *   }
+ * )
+ * */
 struct Network {
   std::vector<Layer> layers;
+  std::mt19937 rng{std::random_device{}()};
 
-  const void debug() {
-    for (int i = 0; i < layers.size(); i++) {
+  Network(NetworkConfig net) {
+    if (net.layer_count < 1) {
+      throw std::runtime_error("netconfig has <1 layer");
+    }
+    if (net.input_size < 1) {
+      throw std::runtime_error("net input size <1");
+    }
+    layers.push_back(Layer(net.layers[0].width, net.input_size, rng));
+    for (size_t i = 1; i < net.layer_count; i++) {
+      layers.push_back(
+          Layer(net.layers[i].width, net.layers[i - 1].width, rng));
+    }
+  }
+
+  void debug() const {
+    for (size_t i = 0; i < layers.size(); i++) {
       std::cout << "Layer " << i << ":\n";
       layers[i].debug();
     }
@@ -98,12 +139,8 @@ struct Network {
  *
  * */
 
-std::mt19937 rng(std::random_device{}());
-
-Layer A(5, 2, rng);
-Layer B(2, 5, rng);
-
-Network network{{A, B}};
+NetworkConfig netconf{1, {{2}, {5}, {3}}};
+Network network{netconf};
 
 int main() {
   std::cout << std::fixed << std::setprecision(4);
