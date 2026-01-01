@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <random>
 #include <vector>
 
@@ -66,6 +67,7 @@ struct NetworkConfig {
  *      { layer_width }
  * TODO: change to
  * 	{ size_t layer_width, vector<vector<double>> weights, etc}
+ *
  *   }
  * )
  * */
@@ -77,3 +79,15 @@ struct Network {
 
   void debug() const;
 };
+
+// TODO: PORT NGRAMS
+
+std::map<std::string, int> extract_ngrams(const std::string &filename, int n);
+
+std::vector<std::pair<std::string, int>>
+get_top_k(const std::map<std::string, int> &ngrams, int k);
+
+std::map<std::string, int>
+combine_ngrams(const std::vector<std::map<std::string, int>> &ngram_maps);
+
+int top_ngrams(std::vector<std::string> &paths, int k);
