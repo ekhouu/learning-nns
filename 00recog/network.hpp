@@ -80,7 +80,13 @@ struct Network {
   void debug() const;
 };
 
-// TODO: PORT NGRAMS
+// TODO: flesh out ngramconfig
+struct NGramConfig {
+  int bk;
+  int tk;
+};
+
+std::string standardize(const std::string &text);
 
 std::map<std::string, int> extract_ngrams(const std::string &filename, int n);
 
@@ -90,4 +96,4 @@ get_top_k(const std::map<std::string, int> &ngrams, int k);
 std::map<std::string, int>
 combine_ngrams(const std::vector<std::map<std::string, int>> &ngram_maps);
 
-int top_ngrams(std::vector<std::string> &paths, int k);
+int top_ngrams(std::vector<std::string> &paths, NGramConfig nconf);

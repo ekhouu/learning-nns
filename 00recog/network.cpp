@@ -106,17 +106,29 @@ void Network::debug() const {
   }
 }
 
+std::string standardize(const std::string &text) {
+  std::string result = text;
+
+  result.erase(std::remove_if(result.begin(), result.end(),
+                              [](char c) { return (unsigned char)c > 127; }),
+               result.end());
+
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+
+  return result;
+}
+
 // NGRAMS
 std::map<std::string, int> extract_ngrams(const std::string &filename, int n) {
   std::ifstream file(filename);
   std::map<std::string, int> ngrams;
   std::string line;
 
-  // TODO: count all words in file & add parameter to ngram picking
+  // TODO: count all words in file & add parameter to for unique iden weighing
   while (std::getline(file, line)) {
-    line.erase(std::remove_if(line.begin(), line.end(),
-                              [](char c) { return (unsigned char)c > 127; }),
-               line.end());
+    // DONE: normalize text
+    line = standardize(line);
     for (size_t i = 0; i + n <= line.length(); i++) {
       std::string ngram = line.substr(i, n);
       ngrams[ngram]++;
@@ -147,7 +159,7 @@ combine_ngrams(const std::vector<std::map<std::string, int>> &ngram_maps) {
   return out;
 }
 
-int top_ngrams(std::vector<std::string> &paths, int k) {
+int top_ngrams(std::vector<std::string> &paths, NGramConfig nconf) {
   std::vector<std::map<std::string, int>> bi, tri;
   for (auto &p : paths) {
     bi.push_back(extract_ngrams(p, 2));
@@ -158,8 +170,8 @@ int top_ngrams(std::vector<std::string> &paths, int k) {
   std::map<std::string, int> trigrams = combine_ngrams(tri);
 
   json ngrams_data;
-  ngrams_data["bigrams"] = get_top_k(bigrams, k);
-  ngrams_data["trigrams"] = get_top_k(trigrams, k);
+  ngrams_data["bigrams"] = get_top_k(bigrams, nconf.bk);
+  ngrams_data["trigrams"] = get_top_k(trigrams, nconf.tk);
   std::ofstream("out/ngrams.json") << ngrams_data.dump(2);
 
   return 1;
