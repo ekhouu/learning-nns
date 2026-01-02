@@ -176,3 +176,7 @@ int top_ngrams(std::vector<std::string> &paths, NGramConfig nconf) {
 
   return 1;
 }
+
+NGramConfig::NGramConfig(size_t b, size_t t) : bk{b}, tk{t} {
+  features = b + t;
+}
