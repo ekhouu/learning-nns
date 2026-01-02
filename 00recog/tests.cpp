@@ -31,6 +31,8 @@ int main() { top_ngrams(LANG, ngramconf); }
 // for now, we're using a frequency vector
 
 // TODO: consider reworking this loading thing cuz it's kind of ass
+// could maybe use like an array but it would be a bit annoying to make a
+// mapping so i guess we can stick w/ this for now?
 NGramConfig load_ngrams(std::string ngrams_json) {
 
   std::map<std::string, size_t> conv;
