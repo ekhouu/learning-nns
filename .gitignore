@@ -39,3 +39,9 @@
 
 # debug information files
 *.dwo
+
+# directories
+/00recog/out/
+out/
+batches/
+
