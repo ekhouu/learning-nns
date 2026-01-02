@@ -101,3 +101,9 @@ std::map<std::string, int>
 combine_ngrams(const std::vector<std::map<std::string, int>> &ngram_maps);
 
 int top_ngrams(std::vector<std::string> &paths, NGramConfig nconf);
+
+std::vector<double> ngramify(std::string s, NGramConfig &ngram_config);
+void found_incre(std::string key, std::map<std::string, size_t> &map,
+                 std::vector<double> &vec);
+
+NGramConfig load_ngrams(std::string ngrams_json);
