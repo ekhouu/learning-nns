@@ -75,6 +75,12 @@ void found_incre(std::string key, std::map<std::string, size_t> &map,
   auto it = map.find(key);
   if (it != map.end()) {
     vec[it->second]++;
+<<<<<<< HEAD
+=======
+    // DEBUG
+    std::cout << "{DEBUG} Found known ngram " << key << " with vector position "
+              << it->second << std::endl;
+>>>>>>> ca5f45a789f174673738431505566283bdd1f7d3
   }
 }
 
@@ -110,8 +116,22 @@ size_t biN = 275, triN = 225;
 NGramConfig ngramconf(biN, triN);
 
 int main() {
-  // top_ngrams(LANG, ngramconf);
+  top_ngrams(LANG, ngramconf);
   std::string NGRAMS_PATH = "out/ngrams.json";
   NGramConfig ngram_config = load_ngrams(NGRAMS_PATH);
   size_t n = ngram_config.features;
+
+  std::cout << "{DEBUG} BONJOUR\n";
+  std::vector<double> ified = ngramify("bonjour", ngram_config);
+  std::cout << "{DEBUG} VECTOR PARSE\n";
+  for (size_t i = 0; i < n; i++) {
+    if (ified[i] > 0) {
+      std::cout << "{DEBUG} index " << i << std::endl;
+    }
+  }
+
+  ified = ngramify("liebe", ngram_config);
+  ified = ngramify("photosynthesis", ngram_config);
+  ified = ngramify("chateaux", ngram_config);
+>>>>>>> ca5f45a789f174673738431505566283bdd1f7d3
 }
