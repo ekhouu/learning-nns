@@ -82,8 +82,12 @@ struct Network {
 
 // TODO: flesh out ngramconfig
 struct NGramConfig {
-  int bk;
-  int tk;
+  size_t bk;
+  size_t tk;
+  size_t features;
+  std::map<std::string, size_t> conv;
+
+  NGramConfig(size_t b, size_t t);
 };
 
 std::string standardize(const std::string &text);
