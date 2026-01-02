@@ -107,3 +107,7 @@ void found_incre(std::string key, std::map<std::string, size_t> &map,
                  std::vector<double> &vec);
 
 NGramConfig load_ngrams(std::string ngrams_json);
+
+int featurize_dataset(std::vector<std::string> &filenames,
+                      NGramConfig &ngram_config, size_t max_batch,
+                      std::string batch_dir);

@@ -41,7 +41,7 @@
 *.dwo
 
 # directories
-/00recog/out/
-out/
-batches/
+/00recog/out/*
+out/*
+batches/*
 

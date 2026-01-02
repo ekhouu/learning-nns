@@ -249,3 +249,43 @@ std::vector<double> ngramify(std::string s, NGramConfig &ngram_config) {
 
   return ngram_vec;
 }
+
+int featurize_dataset(std::vector<std::string> &filenames,
+                      NGramConfig &ngram_config, size_t max_batch,
+                      std::string batch_dir) {
+  std::map<std::string, std::map<std::string, std::vector<double>>> data;
+  std::string line;
+
+  // i know batches can be found w/ math but im going to manually do it just to
+  // be sure for now, will fix later
+  size_t batch = 0, batches = 0;
+  for (auto &filename : filenames) {
+    std::ifstream file(filename);
+    while (std::getline(file, line)) {
+      line = standardize(line);
+      data[filename][line] = ngramify(line, ngram_config);
+      batch++;
+      if (batch != 0 && batch % max_batch == 0) {
+        json j;
+        j["n_batch"] = max_batch;
+        j["batch_n"] = batches++;
+        j["data"] = data;
+        data.clear();
+        std::ofstream(batch_dir + std::to_string(batches) + "_batch.json")
+            << j.dump();
+      }
+    }
+    file.close();
+  }
+
+  if (batch % max_batch != 0) {
+    json j;
+    j["n_batch"] = batch % max_batch;
+    j["batch_n"] = batch / max_batch;
+    j["data"] = data;
+    std::ofstream(batch_dir + std::to_string(batches) + "_batch.json")
+        << j.dump();
+  }
+
+  return 1;
+}
