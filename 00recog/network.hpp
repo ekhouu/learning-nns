@@ -40,6 +40,7 @@ struct Neuron {
 struct Layer {
   std::vector<Neuron> neurons;
   size_t width;
+  bool xput;
 
   // z = \sum_i (w_i x_i) + b (affine)
   std::vector<double> a, z, deltas;

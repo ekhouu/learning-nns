@@ -54,6 +54,7 @@ void Neuron::debug_weights() const {
 // TODO: make implementation more modular (i.e. make it easier to load saved NNs
 // instead of regen & override)
 Layer::Layer(size_t w, size_t prev, std::mt19937 &rng) {
+  width = w;
   for (size_t i = 0; i < w; i++) {
     neurons.push_back(Neuron(prev, rng, 0.00));
   }
@@ -94,6 +95,7 @@ Network::Network(NetworkConfig net) {
   }
 
   layers.push_back(Layer(net.layers[0].width, net.input_size, rng));
+
   for (size_t i = 1; i < net.layer_count; i++) {
     layers.push_back(Layer(net.layers[i].width, net.layers[i - 1].width, rng));
   }
