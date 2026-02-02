@@ -11,8 +11,15 @@ I do not think that I am going to follow this course by the letter, but I like t
  |-- neuron.cpp
 ```
 
-Currently I am creating an extremely simple network for elementary glyph recognition.
+Simple MLP implementation in CPP
 My foundations for this are just lecture material so... don't judge too harshly if you come across this haha I'm trying my best to implement it all on my own.
 
 - Went w/ slightly superfluous OOP approach for this because I want to focus on NN theory rn
 - Will probably re-implement as matrix multiplication after I've got it working
+
+```bash
+01basics
+ |-- bpe.py
+```
+
+Quick savestate for the seeds of my LLM implementation, following [Stanford CS336 2025 Assignment 1](https://github.com/stanford-cs336/assignment1-basics/tree/main)
