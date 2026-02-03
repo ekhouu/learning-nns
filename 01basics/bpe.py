@@ -5,7 +5,10 @@ import regex as re
 
 
 def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]):
-    corpus = input_path
+    corpus: str
+
+    with open(input_path, 'r', encoding='utf-8') as f:
+        corpus = f.read()
 
     n_curr = 256
 
@@ -50,6 +53,7 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]):
 
         tok = [int(b) for b in bytes(it.group().strip(), "utf-8")]
         n = len(tok)
+        if n == 0: continue
 
         tokens.extend(tok)
 
@@ -92,36 +96,105 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]):
             return k
         return None
 
-    # TODO: finish this logic
-    # UPDATE LOCATIONS? maybe later
+    # merge logic
+    # a = prev[cr]
+    # b = cr
+    # l = prev[a]
+    # r = post[b]
+    # DISAPPEARANCES
+    # (L,A) disappears if L
+    # (A,B) disappears - best
+    # (B,R) disappears if R
+
     while n_curr < vocab_size:
+        # moved removing logic to function
         best = next_key()
-        if not best:
+        if best is None:
             break
 
+        a_id, b_id = unpack(best)
         working_dict[best] = n_curr
-        new_adds = Counter()
+        touched = set()
 
-        for cr in cur[best]:
-            if prev[cr] == -2 or prev[prev[cr]] == -2:
-                continue
+        # rewrite
+        # if l is valid
+        #   - create l key using tokens[prev[cr]]
+        #   - occ[k] = occ.get(k,0) + 1
+        #   - cur.setdefault(k, []).append(tokens[cr])
 
-            tokens[cr] = n_curr
+        # ok we spamming comments bc
+        # im tired of looking at this and hating myself
 
-            # makes sure this no longer is considered
-            # do when we no longer need it
-            prev[cr] = prev[prev[cr]]
-            post[prev[cr]] = cr
+        # FOR EVERY OCCURENCE
+        for b in cur.get(best, []):
+            # PAIR IS (A,B)
+            # WE STORE RIGHT SIDE (B)
+            # SO WE NEED TO DERIVE A
+            a = prev[b]
 
-            pre_k = pack(tokens[prev[cr]], tokens[cr])
-            new_adds[pre_k] += 1
+            # ALL the cases
+            # if a==-1 --> a is the start of a word
+            # if a==-2 --> b has already been touched
+            if a<0: continue
+            # if  ==-2 --> a has already been touched
+            if prev[a] == -2: continue
+            # if  !=b  --> a was touched and b was ejected
+            if post[a] != b: continue
+            # this one is basically if it has changed since we last saw
+            # not sure if this is possible anymore? should whiteboard
+            if tokens[a] != a_id or tokens[b] != b_id: continue
 
-            if post[cr] == -1 or prev[post[cr]] == -2:
-                continue
+            l = prev[a]
+            r = post[b]
 
-            prev[post[cr]] = cr
+            if l >= 0:
+                k = pack(tokens[l], tokens[a])
+                occ[k] = occ.get(k,0) - 1
+                touched.add(k)
 
-            post_k = pack(tokens[cr], tokens[post[cr]])
-            new_adds[post_k] += 1
+            occ[best] = occ.get(best, 0) - 1
+            touched.add(best)
+
+            if r >= 0:
+                k = pack(tokens[b], tokens[r])
+                occ[k] = occ.get(k,0) - 1
+                touched.add(k)
+
+            tokens[b] = n_curr
+            # tbh i think i could only use prev but im scared to change it
+            # bc it works now
+            prev[a] = -2
+            post[a] = -2
+
+            prev[b] = l if l >= 0 else -1
+            if l >= 0:
+                post[l] = b
+
+            post[b] = r if r>=0 else -1
+            if r >= 0:
+                prev[r] = b
+
+            # DO NOT MOVE THIS SECTION
+            # HAS TO BE DONE AFTER EVERYTHING ELSE
+            if l >= 0:
+                k = pack(tokens[l], tokens[b]) # since we already changed [b]
+                occ[k] = occ.get(k,0) + 1
+                cur.setdefault(k, []).append(b)
+                touched.add(k)
+
+            if r >= 0:
+                k = pack(tokens[b], tokens[r])
+                occ[k] = occ.get(k,0) + 1
+                cur.setdefault(k, []).append(r)
+                touched.add(k)
+
+            for k in touched:
+                c = occ.get(k, 0)
+                if c <= 0:
+                    occ.pop(k, None)
+                else:
+                    heapq.heappush(heap, (-c, -k))
 
         n_curr += 1
+
+train_bpe("SPECIAL_TEST.txt",500,[])
