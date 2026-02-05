@@ -1,14 +1,32 @@
 """
 og bpe merge implementation
+
+ACCREDATION
+I wrote basically everything here by hand, however I had Codex 6.3 aid me with pybind11 (see bpe_low.cpp for info).
+There is a longer version of this file (well, not "longer" code-wise, but longer as in it has my early code + notes)
+in the cs336_basics/OLD folder. It shows a lot of the logic I ended up moving to bpe_low.cpp.
 """
 
-import heapq
 import multiprocessing as mp
 import os
 from array import array
 from typing import Any, BinaryIO
 
 import regex as re
+
+try:
+    from . import bpe_low
+except ImportError:
+    try:
+        import bpe_low
+    except ImportError:
+        import sys
+        from pathlib import Path
+
+        repo_root = str(Path(__file__).resolve().parents[1])
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        import cs336_basics.bpe_low as bpe_low
 
 # TODO: list by priority
 # - REORGANIZE!
@@ -21,6 +39,18 @@ Optimization Log
 - changed how tok was built
 - changed cur storage method + TRIED to rm stale
 - regex ops
+== SECOND OPTIMIZATION
+- gave up and moved merge logic to cpp
+    PIPELINE NOW IS LIKE
+        python : processes file THEN makes tokens, prev, post
+        cpp    : takes tokens, prev, post THEN makes occ,cur THEN does bpe merge
+                 THEN sends final elements back to python
+        python : takes final elements THEN serializes to json
+"""
+
+"""
+TEST RESULTS
+Passes all tests in 1.09s.
 """
 
 _WORKER_F: BinaryIO
@@ -92,7 +122,7 @@ def pretoken_worker(chunk: str, special_tokens):
     _allo = max(1, len(chunk))
     _occ = {}
     _cur: dict[int, array] = {}
-    _tokens = array("I")
+    _tokens = array("H")
 
     _prev = array("I")
     if _allo > 0:
@@ -119,6 +149,7 @@ def pretoken_worker(chunk: str, special_tokens):
 
             _tokens.extend(tok)
 
+            """
             for i in range(1, n):
                 pk = pack(tok[i - 1], tok[i])
                 if pk not in _occ:
@@ -127,6 +158,7 @@ def pretoken_worker(chunk: str, special_tokens):
                 else:
                     _occ[pk] += 1
                     _cur[pk].append(local_n_t + i)
+            """
 
             local_n_t += n
 
@@ -146,8 +178,6 @@ def pretoken_worker(chunk: str, special_tokens):
     return {
         "local_n_t": local_n_t,
         "tokens": _tokens,
-        "occ": _occ,
-        "cur": _cur,
         "prev": array("I", _prev[:local_n_t]),
         "post": array("I", _post[:local_n_t]),
     }
@@ -183,8 +213,6 @@ def train_bpe(
         working_dict[special] = n_curr
         n_curr += 1
 
-    fmerge = n_curr
-
     """
     if special_tokens:
         parts = re.split(f"({special_try})", corpus)
@@ -194,15 +222,12 @@ def train_bpe(
 
     n_t = 0
 
-    occ = {}
-    cur = {}
-
-    tokens = array("I")
+    tokens = array("H")
     prev = array("I")
     post = array("I")
 
     def consume(result):
-        nonlocal n_t, occ, cur, tokens, prev, post
+        nonlocal n_t, tokens, prev, post
         pv = result["prev"]
         po = result["post"]
 
@@ -218,6 +243,7 @@ def train_bpe(
         post.extend(po)
         tokens.extend(result["tokens"])
 
+        """
         for k, cnt in result["occ"].items():
             occ[k] = occ.get(k, 0) + cnt
 
@@ -230,6 +256,7 @@ def train_bpe(
                 cur[a].extend(b)
             else:
                 cur[a] = b
+        """
 
         n_t += result["local_n_t"]
 
@@ -239,6 +266,8 @@ def train_bpe(
         # this splits into bounds
         # to get each bound
         tasks = ((i, s, e) for i, (s, e) in enumerate(zip(bounds[:-1], bounds[1:])))
+
+    print("{DEBUG} Launching pools...")
 
     with mp.Pool(
         processes=workers,
@@ -253,7 +282,8 @@ def train_bpe(
                 consume(pending.pop(next_idx))
                 next_idx += 1
 
-    print("{DEBUG} All pools done!")
+    assert n_t == len(prev) == len(tokens) == len(post)
+
     print("{DEBUG} All pools consolidated!")
 
     tok_bytes = [b""] * n_curr
@@ -266,180 +296,20 @@ def train_bpe(
         a_id, b_id = unpack(k)
         return (_RevBytes(tok_bytes[a_id]), _RevBytes(tok_bytes[b_id]))
 
-    print("{DEBUG} Building heap...")
-    heap = [(-cnt, *_pair_key(k), k) for k, cnt in occ.items() if cnt > 0]
-    heapq.heapify(heap)
-    print("{DEBUG} Heap built...")
+    merges = bpe_low.bpe_merge(
+        tokens=tokens,
+        prev=prev,
+        post=post,
+        n_t=n_t,
+        vocab_size=vocab_size,
+        special_tokens=special_tokens,
+    )
 
-    def next_key():
-        while heap:
-            neg_cnt, _, _, k = heap[0]
-            cnt = -neg_cnt
-            if occ.get(k, 0) != cnt:
-                heapq.heappop(heap)
-                continue
-            return k
-        return None
-
-    # merge logic
-    # a = prev[cr]
-    # b = cr
-    # l = prev[a]
-    # r = post[b]
-    # DISAPPEARANCES
-    # (L,A) disappears if L
-    # (A,B) disappears - best
-    # (B,R) disappears if R
-
-    merges = []
-
-    while n_curr < vocab_size:
-        # moved removing logic to function
-        best = next_key()
-        if best is None:
-            break
-
-        a_id, b_id = unpack(best)
-        working_dict[best] = n_curr
+    for packed in merges:
+        a_id, b_id = unpack(packed)
         tok_bytes.append(tok_bytes[a_id] + tok_bytes[b_id])
-        touched = set()
 
-        # rewrite
-        # if l is valid
-        #   - create l key using tokens[prev[cr]]
-        #   - occ[k] = occ.get(k,0) + 1
-        #   - cur.setdefault(k, []).append(tokens[cr])
-
-        # ok we spamming comments bc
-        # im tired of looking at this and hating myself
-
-        # FOR EVERY OCCURENCE
-        for b in cur.get(best, []):
-            # PAIR IS (A,B)
-            # WE STORE RIGHT SIDE (B)
-            # SO WE NEED TO DERIVE A
-            a = prev[b]
-
-            # ALL the cases
-            # if a==U32_NONE --> a is the start of a word
-            # if a==U32_TOUCHED --> b has already been touched
-            if a >= U32_TOUCHED:
-                continue
-            # if  ==U32_TOUCHED --> a has already been touched
-            if prev[a] == U32_TOUCHED:
-                continue
-            # if  !=b  --> a was touched and b was ejected
-            if post[a] != b:
-                continue
-            # this one is basically if it has changed since we last saw
-            # not sure if this is possible anymore? should whiteboard
-            if tokens[a] != a_id or tokens[b] != b_id:
-                continue
-
-            l = prev[a]
-            r = post[b]
-
-            if l < U32_TOUCHED:
-                k = pack(tokens[l], tokens[a])
-                occ[k] = occ.get(k, 0) - 1
-                touched.add(k)
-
-            occ[best] = occ.get(best, 0) - 1
-            touched.add(best)
-
-            if r < U32_TOUCHED:
-                k = pack(tokens[b], tokens[r])
-                occ[k] = occ.get(k, 0) - 1
-                touched.add(k)
-
-            tokens[b] = n_curr
-            # tbh i think i could only use prev but im scared to change it
-            # bc it works now
-            prev[a] = U32_TOUCHED
-            post[a] = U32_TOUCHED
-
-            prev[b] = l if l < U32_TOUCHED else U32_NONE
-            if l < U32_TOUCHED:
-                post[l] = b
-
-            post[b] = r if r < U32_TOUCHED else U32_NONE
-            if r < U32_TOUCHED:
-                prev[r] = b
-
-            # HAS TO BE DONE AFTER EVERYTHING ELSE
-            if l < U32_TOUCHED:
-                k = pack(tokens[l], tokens[b])  # since we already changed [b]
-                occ[k] = occ.get(k, 0) + 1
-                arr = cur.get(k)
-                if arr is None:
-                    cur[k] = array("I", [b])
-                else:
-                    arr.append(b)
-                touched.add(k)
-
-            if r < U32_TOUCHED:
-                k = pack(tokens[b], tokens[r])
-                occ[k] = occ.get(k, 0) + 1
-                arr = cur.get(k)
-                if arr is None:
-                    cur[k] = array("I", [r])
-                else:
-                    arr.append(r)
-                touched.add(k)
-
-        for k in touched:
-            c = occ.get(k, 0)
-            if c <= 0:
-                occ.pop(k, None)
-                cur.pop(k, None)
-            else:
-                heapq.heappush(heap, (-c, *_pair_key(k), k))
-
-        merges.append(best)
-        cur.pop(best, None)
-        n_curr += 1
-        if n_curr % 10 == 0:
-            print(f"Merged: {n_curr} words")
-
-    # DEBUG
-    # thinking about merge structure
-    # we start from l side of merges array
-    # [12,25,39]...etc
-    # we unpack
-    # a_id, b_id = unpack(m)
-    # so example
-    # a_id, b_id = 1,2
-    # then we want to convert to bytes
-    # we can do it using the previous merges AND build dict at the same time
-
-    # check if a_id and b_id are in basic bytes dict (0-255)
-    # if yes, use bytes for remapping
-    # if not,
-    #       recursively unpack a_id and b_id until they are
-    #           add to dict so we dont have to do it again
-
-    # ok no recursion :(
-    """
-    with open("debug_merge.txt", "w", encoding="utf-8") as f:
-        final_dict = {i: bytes([i]) for i in range(0, 256)}
-
-        # LOW PRIORITY todo write into output (cuz memory overhead)
-        def bk_unpack(token_id: int) -> bytes:
-            if token_id in final_dict:
-                return final_dict[token_id]
-
-            packed = merges[token_id - fmerge]
-            a_id, b_id = unpack(packed)
-            a, b = bk_unpack(a_id), bk_unpack(b_id)
-            final_dict[token_id] = a + b
-            return final_dict[token_id]
-
-        for m in merges:
-            a_id, b_id = unpack(m)
-            out_merges.append((bk_unpack(a_id), bk_unpack(b_id)))
-            # f.write(f"a_id: {a_id}, b_id: {b_id} --> {out_merges[-1]}\n")
-    """
-
+    n_curr += len(merges)
     final_dict = {i: tok_bytes[i] for i in range(n_curr)}
     out_merges = [
         (tok_bytes[a], tok_bytes[b]) for (a, b) in (unpack(pk) for pk in merges)
@@ -504,8 +374,11 @@ def find_chunk_boundaries(
 
 
 def main():
+    from pathlib import Path
+
+    input_path = Path(__file__).resolve().parents[1] / "data" / "TinyStoriesV2-GPT4-train.txt"
     out_dict, out_merges = train_bpe(
-        "../data/TinyStoriesV2-GPT4-valid.txt", 10000, ["<|endoftext|>"], workers=8
+        str(input_path), 10000, ["<|endoftext|>"], workers=8
     )
 
     import json
@@ -524,6 +397,5 @@ def main():
             {"vocab": out_dict_json, "merges": out_merges_json}, json_file, indent=2
         )
 
-
-# if __name__ == "__main__":
-#    main()
+if __name__ == "__main__":
+    main()
