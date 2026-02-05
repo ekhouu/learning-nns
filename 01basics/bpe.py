@@ -13,13 +13,36 @@ import regex as re
 # TODO: list by priority
 # - REORGANIZE!
 
+"""
+Optimization Log
+== FIRST OPTIMIZATION
+- changed lists to array('I') (2.2B input token file)
+- changed -1 and -2 from testing to U32_NONE and U32_TOUCHED to remove signedness
+- changed how tok was built
+- changed cur storage method + TRIED to rm stale
+- regex ops
+"""
+
 _WORKER_F: BinaryIO
 _WORKER_SPECIAL = None
+_WORKER_SPECIAL_SPLIT: Any
+_WORKER_SPECIAL_IDS: dict[str, int]
 
 
 def _init_worker(path, special_tokens):
+
     global _WORKER_F
     global _WORKER_SPECIAL
+    global _WORKER_SPECIAL_SPLIT
+    global _WORKER_SPECIAL_IDS
+
+    if special_tokens:
+        _WORKER_SPECIAL_IDS = {s: 256 + i for i, s in enumerate(special_tokens)}
+        _WORKER_SPECIAL_SPLIT = re.compile(f"({special_try(special_tokens)})")
+    else:
+        _WORKER_SPECIAL_IDS = {}
+        _WORKER_SPECIAL_SPLIT = None
+
     _WORKER_F = open(path, "rb", buffering=0)
     _WORKER_SPECIAL = special_tokens
 
@@ -34,6 +57,10 @@ def _task(task):
 
 SHIFT = 16
 MASK = (1 << SHIFT) - 1
+U32_BITS = array("I").itemsize * 8
+U32_MAX = (1 << U32_BITS) - 1
+U32_TOUCHED = U32_MAX - 1
+U32_NONE = U32_MAX
 
 
 def pack(a: int, b: int) -> int:
@@ -62,26 +89,30 @@ def pretoken_worker(chunk: str, special_tokens):
     # while creating the final ver but i think it will be fast enough + multiproc
     # is a worthwhile tradeoff
 
-    _allo = len(chunk)
+    _allo = max(1, len(chunk))
     _occ = {}
-    _cur = {}
-    _tokens = []
+    _cur: dict[int, array] = {}
+    _tokens = array("I")
 
-    _prev = list(range(-1, _allo - 1))
-    _post = list(range(1, _allo + 1))
+    _prev = array("I")
+    if _allo > 0:
+        _prev.append(U32_NONE)
+        if _allo > 1:
+            _prev.extend(range(0, _allo - 1))
+    _post = array("I", range(1, _allo + 1))
 
     local_n_t = 0
 
-    if special_tokens:
-        parts = re.split(f"({special_try(special_tokens)})", chunk)
+    if _WORKER_SPECIAL_SPLIT:
+        parts = _WORKER_SPECIAL_SPLIT.split(chunk)
     else:
         parts = [chunk]
 
     for part in parts:
-        if not part or part in special_tokens:
+        if not part or part in _WORKER_SPECIAL_IDS:
             continue
         for it in CRE.finditer(part):
-            tok = [int(b) for b in bytes(it.group(), "utf-8")]
+            tok = it.group().encode("utf-8")
             n = len(tok)
             if n == 0:
                 continue
@@ -92,33 +123,33 @@ def pretoken_worker(chunk: str, special_tokens):
                 pk = pack(tok[i - 1], tok[i])
                 if pk not in _occ:
                     _occ[pk] = 1
-                    _cur[pk] = [local_n_t + i]
+                    _cur[pk] = array("I", [local_n_t + i])
                 else:
                     _occ[pk] += 1
                     _cur[pk].append(local_n_t + i)
 
             local_n_t += n
 
-            if local_n_t + 1 > _allo:
+            while local_n_t + 1 > _allo:
                 old_allo = _allo
                 _allo *= 2
                 _prev.extend(range(old_allo - 1, _allo - 1))
                 _post.extend(range(old_allo + 1, _allo + 1))
 
             # [h e l l o]
-            # prev[5-5] = prev[0] = -1
-            # post[5-1] = prev[4] = -1
+            # prev[5-5] = prev[0] = U32_NONE
+            # post[5-1] = prev[4] = U32_NONE
 
-            _prev[local_n_t - n] = -1
-            _post[local_n_t - 1] = -1
+            _prev[local_n_t - n] = U32_NONE
+            _post[local_n_t - 1] = U32_NONE
 
     return {
         "local_n_t": local_n_t,
-        "tokens": array("I", _tokens),
+        "tokens": _tokens,
         "occ": _occ,
-        "cur": {k: array("I", v) for k, v in _cur.items()},
-        "prev": array("i", _prev[:local_n_t]),
-        "post": array("i", _post[:local_n_t]),
+        "cur": _cur,
+        "prev": array("I", _prev[:local_n_t]),
+        "post": array("I", _post[:local_n_t]),
     }
 
 
@@ -166,9 +197,9 @@ def train_bpe(
     occ = {}
     cur = {}
 
-    tokens = []
-    prev = []
-    post = []
+    tokens = array("I")
+    prev = array("I")
+    post = array("I")
 
     def consume(result):
         nonlocal n_t, occ, cur, tokens, prev, post
@@ -177,20 +208,15 @@ def train_bpe(
 
         for i in range(len(pv)):
             p = pv[i]
-            if p >= 0:
+            if p < U32_TOUCHED:
                 pv[i] = p + n_t
             q = po[i]
-            if q >= 0:
+            if q < U32_TOUCHED:
                 po[i] = q + n_t
 
         prev.extend(pv)
         post.extend(po)
         tokens.extend(result["tokens"])
-
-        eot_id = working_dict["<|endoftext|>"]
-        tokens.append(eot_id)
-        prev.append(-1)
-        post.append(-1)
 
         for k, cnt in result["occ"].items():
             occ[k] = occ.get(k, 0) + cnt
@@ -205,11 +231,11 @@ def train_bpe(
             else:
                 cur[a] = b
 
-        n_t += result["local_n_t"] + 1
+        n_t += result["local_n_t"]
 
     # STARTING TO IMPLEMENT MULTIPROCESSING
     with open(input_path, "rb") as f:
-        bounds = find_chunk_boundaries(f, workers, bytes("<|endoftext|>", "utf-8"))
+        bounds = find_chunk_boundaries(f, workers * 4, bytes("<|endoftext|>", "utf-8"))
         # this splits into bounds
         # to get each bound
         tasks = ((i, s, e) for i, (s, e) in enumerate(zip(bounds[:-1], bounds[1:])))
@@ -240,8 +266,10 @@ def train_bpe(
         a_id, b_id = unpack(k)
         return (_RevBytes(tok_bytes[a_id]), _RevBytes(tok_bytes[b_id]))
 
+    print("{DEBUG} Building heap...")
     heap = [(-cnt, *_pair_key(k), k) for k, cnt in occ.items() if cnt > 0]
     heapq.heapify(heap)
+    print("{DEBUG} Heap built...")
 
     def next_key():
         while heap:
@@ -293,12 +321,12 @@ def train_bpe(
             a = prev[b]
 
             # ALL the cases
-            # if a==-1 --> a is the start of a word
-            # if a==-2 --> b has already been touched
-            if a < 0:
+            # if a==U32_NONE --> a is the start of a word
+            # if a==U32_TOUCHED --> b has already been touched
+            if a >= U32_TOUCHED:
                 continue
-            # if  ==-2 --> a has already been touched
-            if prev[a] == -2:
+            # if  ==U32_TOUCHED --> a has already been touched
+            if prev[a] == U32_TOUCHED:
                 continue
             # if  !=b  --> a was touched and b was ejected
             if post[a] != b:
@@ -311,7 +339,7 @@ def train_bpe(
             l = prev[a]
             r = post[b]
 
-            if l >= 0:
+            if l < U32_TOUCHED:
                 k = pack(tokens[l], tokens[a])
                 occ[k] = occ.get(k, 0) - 1
                 touched.add(k)
@@ -319,7 +347,7 @@ def train_bpe(
             occ[best] = occ.get(best, 0) - 1
             touched.add(best)
 
-            if r >= 0:
+            if r < U32_TOUCHED:
                 k = pack(tokens[b], tokens[r])
                 occ[k] = occ.get(k, 0) - 1
                 touched.add(k)
@@ -327,39 +355,51 @@ def train_bpe(
             tokens[b] = n_curr
             # tbh i think i could only use prev but im scared to change it
             # bc it works now
-            prev[a] = -2
-            post[a] = -2
+            prev[a] = U32_TOUCHED
+            post[a] = U32_TOUCHED
 
-            prev[b] = l if l >= 0 else -1
-            if l >= 0:
+            prev[b] = l if l < U32_TOUCHED else U32_NONE
+            if l < U32_TOUCHED:
                 post[l] = b
 
-            post[b] = r if r >= 0 else -1
-            if r >= 0:
+            post[b] = r if r < U32_TOUCHED else U32_NONE
+            if r < U32_TOUCHED:
                 prev[r] = b
 
             # HAS TO BE DONE AFTER EVERYTHING ELSE
-            if l >= 0:
+            if l < U32_TOUCHED:
                 k = pack(tokens[l], tokens[b])  # since we already changed [b]
                 occ[k] = occ.get(k, 0) + 1
-                cur.setdefault(k, []).append(b)
+                arr = cur.get(k)
+                if arr is None:
+                    cur[k] = array("I", [b])
+                else:
+                    arr.append(b)
                 touched.add(k)
 
-            if r >= 0:
+            if r < U32_TOUCHED:
                 k = pack(tokens[b], tokens[r])
                 occ[k] = occ.get(k, 0) + 1
-                cur.setdefault(k, []).append(r)
+                arr = cur.get(k)
+                if arr is None:
+                    cur[k] = array("I", [r])
+                else:
+                    arr.append(r)
                 touched.add(k)
 
         for k in touched:
             c = occ.get(k, 0)
             if c <= 0:
                 occ.pop(k, None)
+                cur.pop(k, None)
             else:
                 heapq.heappush(heap, (-c, *_pair_key(k), k))
 
         merges.append(best)
+        cur.pop(best, None)
         n_curr += 1
+        if n_curr % 10 == 0:
+            print(f"Merged: {n_curr} words")
 
     # DEBUG
     # thinking about merge structure
@@ -399,16 +439,6 @@ def train_bpe(
             out_merges.append((bk_unpack(a_id), bk_unpack(b_id)))
             # f.write(f"a_id: {a_id}, b_id: {b_id} --> {out_merges[-1]}\n")
     """
-
-    tok_bytes: list[bytes] = [b""] * n_curr
-    for i in range(256):
-        tok_bytes[i] = bytes([i])
-    for j, s in enumerate(special_tokens):
-        tok_bytes[256 + j] = s.encode("utf-8")
-    for i, pk in enumerate(merges):
-        a_id, b_id = unpack(pk)
-        new_id = fmerge + i
-        tok_bytes[new_id] = tok_bytes[a_id] + tok_bytes[b_id]
 
     final_dict = {i: tok_bytes[i] for i in range(n_curr)}
     out_merges = [
@@ -473,9 +503,9 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-if __name__ == "__main__":
+def main():
     out_dict, out_merges = train_bpe(
-        "../data/TinyStoriesV2-GPT4-valid.txt", 10000, ["<|endoftext|>"], workers=4
+        "../data/TinyStoriesV2-GPT4-valid.txt", 10000, ["<|endoftext|>"], workers=8
     )
 
     import json
@@ -493,3 +523,7 @@ if __name__ == "__main__":
         json.dump(
             {"vocab": out_dict_json, "merges": out_merges_json}, json_file, indent=2
         )
+
+
+# if __name__ == "__main__":
+#    main()
