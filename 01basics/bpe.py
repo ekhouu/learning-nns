@@ -2,38 +2,57 @@
 og bpe merge implementation
 """
 
-from array import array
-from typing import Any, BinaryIO
 import heapq
 import multiprocessing as mp
-import regex as re
 import os
+from array import array
+from typing import Any, BinaryIO
+
+import regex as re
 
 # TODO: list by priority
-# - streaming
-# - reorganize it's so ugly bro
+# - REORGANIZE!
+
+_WORKER_F: BinaryIO
+_WORKER_SPECIAL = None
+
+
+def _init_worker(path, special_tokens):
+    global _WORKER_F
+    global _WORKER_SPECIAL
+    _WORKER_F = open(path, "rb", buffering=0)
+    _WORKER_SPECIAL = special_tokens
+
+
+def _task(task):
+    idx, start, end = task
+    _WORKER_F.seek(start)
+    data = _WORKER_F.read(end - start)
+    chunk = data.decode("utf-8", errors="ignore")
+    return idx, pretoken_worker(chunk, _WORKER_SPECIAL)
+
 
 SHIFT = 16
 MASK = (1 << SHIFT) - 1
 
+
 def pack(a: int, b: int) -> int:
     return (a << SHIFT) | b
 
+
 def unpack(k: int) -> tuple[int, int]:
     return (k >> SHIFT, k & MASK)
+
 
 # hd to implement this because
 # lexicographically greatest stuff
 PAT = r"(?:'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+)"
 CRE = re.compile(PAT)
 
+
 def special_try(special_tokens):
     return "|".join(re.escape(s) for s in sorted(special_tokens, key=len, reverse=True))
 
-def task_enqueue(task_info):
-    idx, chunk, special_tokens = task_info
-    out = pretoken_worker(chunk, special_tokens)
-    return idx, out
 
 # it doesn't really matter what order we assemble the dataset in as long as
 # we are clear about not merging through pretokens (which we are!)
@@ -80,10 +99,10 @@ def pretoken_worker(chunk: str, special_tokens):
 
             local_n_t += n
 
-            if local_n_t+1 > _allo:
+            if local_n_t + 1 > _allo:
                 old_allo = _allo
                 _allo *= 2
-                _prev.extend(range(old_allo-1, _allo -1))
+                _prev.extend(range(old_allo - 1, _allo - 1))
                 _post.extend(range(old_allo + 1, _allo + 1))
 
             # [h e l l o]
@@ -95,12 +114,13 @@ def pretoken_worker(chunk: str, special_tokens):
 
     return {
         "local_n_t": local_n_t,
-        "tokens": array('I',_tokens),
+        "tokens": array("I", _tokens),
         "occ": _occ,
-        "cur": {k: array('I', v) for k, v in _cur.items()},
-        "prev": array('i',_prev[:local_n_t]),
-        "post": array('i',_post[:local_n_t])
+        "cur": {k: array("I", v) for k, v in _cur.items()},
+        "prev": array("i", _prev[:local_n_t]),
+        "post": array("i", _post[:local_n_t]),
     }
+
 
 class _RevBytes:
     __slots__ = ("b",)
@@ -121,7 +141,9 @@ class _RevBytes:
 # - special tokens never get merged cuz we only merge thru pretoks
 #   so we can prolly use multiprocessing to send everything between special toks
 #   in to different threads
-def train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str],workers=4) -> tuple[dict[int,bytes],list[tuple[bytes,bytes]]]:
+def train_bpe(
+    input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str], workers=4
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     n_curr = 256
 
     working_dict = {str(bytes(i)): i for i in range(n_curr)}
@@ -132,43 +154,12 @@ def train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: li
 
     fmerge = n_curr
 
-    def _pair_key(k: int) -> tuple[_RevBytes, _RevBytes]:
-        a_id, b_id = unpack(k)
-        return (_RevBytes(tok_bytes[a_id]), _RevBytes(tok_bytes[b_id]))
-
     """
     if special_tokens:
         parts = re.split(f"({special_try})", corpus)
     else:
         parts = [corpus]
     """
-
-    tok_bytes: list[bytes] = [b""] * n_curr
-    for i in range(256):
-        tok_bytes[i] = bytes([i])
-    for j, s in enumerate(special_tokens):
-        tok_bytes[256 + j] = s.encode("utf-8")
-
-    # STARTING TO IMPLEMENT MULTIPROCESSING
-    with open(input_path, "rb") as f:
-        a = find_chunk_boundaries(f,workers,bytes("<|endoftext|>", 'utf-8'))
-        # this splits into bounds
-        # to get each bound
-        tasks = []
-
-        for idx, (start, end) in enumerate(zip(a[:-1], a[1:])):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            tasks.append((idx, chunk, special_tokens))
-
-    results: list[dict[str, Any] | None] = [None] * len(tasks)
-
-    with mp.Pool(processes=workers) as pool:
-        for idx, out in pool.imap_unordered(task_enqueue, tasks, chunksize=1):
-            results[idx] = out
-
-
-    print("{DEBUG} All pools done!")
 
     n_t = 0
 
@@ -179,10 +170,8 @@ def train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: li
     prev = []
     post = []
 
-    # assemble actual arrays
-    for result in results:
-        if not result: continue
-
+    def consume(result):
+        nonlocal n_t, occ, cur, tokens, prev, post
         pv = result["prev"]
         po = result["post"]
 
@@ -190,7 +179,6 @@ def train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: li
             p = pv[i]
             if p >= 0:
                 pv[i] = p + n_t
-
             q = po[i]
             if q >= 0:
                 po[i] = q + n_t
@@ -199,16 +187,14 @@ def train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: li
         post.extend(po)
         tokens.extend(result["tokens"])
 
-        # for later maybe modularize
         eot_id = working_dict["<|endoftext|>"]
         tokens.append(eot_id)
         prev.append(-1)
         post.append(-1)
 
         for k, cnt in result["occ"].items():
-            occ[k] = occ.get(k,0) + cnt
+            occ[k] = occ.get(k, 0) + cnt
 
-        # occurence places have to be remapped as well
         for arr in result["cur"].values():
             for j in range(len(arr)):
                 arr[j] += n_t
@@ -221,7 +207,38 @@ def train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: li
 
         n_t += result["local_n_t"] + 1
 
+    # STARTING TO IMPLEMENT MULTIPROCESSING
+    with open(input_path, "rb") as f:
+        bounds = find_chunk_boundaries(f, workers, bytes("<|endoftext|>", "utf-8"))
+        # this splits into bounds
+        # to get each bound
+        tasks = ((i, s, e) for i, (s, e) in enumerate(zip(bounds[:-1], bounds[1:])))
+
+    with mp.Pool(
+        processes=workers,
+        initializer=_init_worker,
+        initargs=(input_path, special_tokens),
+    ) as pool:
+        pending = {}
+        next_idx = 0
+        for idx, result in pool.imap(_task, tasks, chunksize=1):
+            pending[idx] = result
+            while next_idx in pending:
+                consume(pending.pop(next_idx))
+                next_idx += 1
+
+    print("{DEBUG} All pools done!")
     print("{DEBUG} All pools consolidated!")
+
+    tok_bytes = [b""] * n_curr
+    for i in range(256):
+        tok_bytes[i] = bytes([i])
+    for j, s in enumerate(special_tokens):
+        tok_bytes[256 + j] = s.encode("utf-8")
+
+    def _pair_key(k: int) -> tuple[_RevBytes, _RevBytes]:
+        a_id, b_id = unpack(k)
+        return (_RevBytes(tok_bytes[a_id]), _RevBytes(tok_bytes[b_id]))
 
     heap = [(-cnt, *_pair_key(k), k) for k, cnt in occ.items() if cnt > 0]
     heapq.heapify(heap)
@@ -387,21 +404,26 @@ def train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: li
     for i in range(256):
         tok_bytes[i] = bytes([i])
     for j, s in enumerate(special_tokens):
-        tok_bytes[256+j] = s.encode('utf-8')
+        tok_bytes[256 + j] = s.encode("utf-8")
     for i, pk in enumerate(merges):
         a_id, b_id = unpack(pk)
         new_id = fmerge + i
         tok_bytes[new_id] = tok_bytes[a_id] + tok_bytes[b_id]
 
-    final_dict = {i : tok_bytes[i] for i in range(n_curr)}
-    out_merges = [(tok_bytes[a], tok_bytes[b]) for (a, b) in (unpack(pk) for pk in merges)]
+    final_dict = {i: tok_bytes[i] for i in range(n_curr)}
+    out_merges = [
+        (tok_bytes[a], tok_bytes[b]) for (a, b) in (unpack(pk) for pk in merges)
+    ]
 
     return final_dict, out_merges
+
 
 """
 This is the pretokenization example provided by the CS336 staff
 I've taken find_chunk_boundaries but nothing else
 """
+
+
 def find_chunk_boundaries(
     file: BinaryIO,
     desired_num_chunks: int,
@@ -411,7 +433,9 @@ def find_chunk_boundaries(
     Chunk the file into parts that can be counted independently.
     May return fewer chunks if the boundaries end up overlapping.
     """
-    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+    assert isinstance(
+        split_special_token, bytes
+    ), "Must represent special token as a bytestring"
 
     # Get total file size in bytes
     file.seek(0, os.SEEK_END)
@@ -450,7 +474,9 @@ def find_chunk_boundaries(
 
 
 if __name__ == "__main__":
-    out_dict, out_merges = train_bpe("TinyStoriesV2-GPT4-valid.txt",10000,["<|endoftext|>"],workers=8)
+    out_dict, out_merges = train_bpe(
+        "../data/TinyStoriesV2-GPT4-valid.txt", 10000, ["<|endoftext|>"], workers=4
+    )
 
     import json
 
@@ -464,4 +490,6 @@ if __name__ == "__main__":
     out_merges_json = [[_bytes_to_str(a), _bytes_to_str(b)] for a, b in out_merges]
 
     with open("out_dict.json", "w", encoding="utf-8") as json_file:
-        json.dump({"vocab": out_dict_json, "merges": out_merges_json}, json_file, indent=2)
+        json.dump(
+            {"vocab": out_dict_json, "merges": out_merges_json}, json_file, indent=2
+        )
