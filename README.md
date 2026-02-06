@@ -20,6 +20,8 @@ My foundations for this are just lecture material so... don't judge too harshly 
 ```bash
 01basics
  |-- bpe.py
+ |-- bpe_low.cpp
+ |-- tokenizer.py
 ```
 
-Quick savestate for the seeds of my LLM implementation, following [Stanford CS336 2025 Assignment 1](https://github.com/stanford-cs336/assignment1-basics/tree/main)
+Quick savestate for the seeds of my LLM implementation, following [Stanford CS336 2025 Assignment 1](https://github.com/stanford-cs336/assignment1-basics/tree/main). Implemented BPE tokenizer and tested on 2.2GB and 12GB .txt datasets. Current code is a bit messy so I will do an architecture rework after I implemented the proper transformer LLM (don't want to overengineer too early...)

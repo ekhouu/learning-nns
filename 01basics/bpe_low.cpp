@@ -1,4 +1,4 @@
-/* ACCREDATION
+/* ACCREDITATION
  * I wrote my original BPE merge logic (see: cs336_basics/OLD/bpe.py) in Python,
  * then moved it to CPP by hand. However, I have never used pybind11 before, and
  * had Codex 5.3 help me out with that. It also aided me in troubleshooting some

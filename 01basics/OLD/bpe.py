@@ -1,27 +1,20 @@
 """
 og bpe merge implementation
-
-Prolly in the future I'll rewrite with chunking
-
-ACCREDITATION
-I wrote basically everything here by hand, however I had Codex 5.3 aid me with pybind11 (see bpe_low.cpp for info).
-There is a longer version of this file (well, not "longer" code-wise, but longer as in it has my early code + notes)
-in the cs336_basics/OLD folder. It shows a lot of the logic I ended up moving to bpe_low.cpp.
 """
 
 import multiprocessing as mp
 import os
 from array import array
 from typing import Any, BinaryIO
-import json
 
 import regex as re
 
 try:
     from . import bpe_low
 except ImportError:
+    # Script mode: `python cs336_basics/bpe.py`
     try:
-        import bpe_low
+        import bpe_low  # type: ignore[import-not-found]
     except ImportError:
         import sys
         from pathlib import Path
@@ -33,6 +26,7 @@ except ImportError:
 
 # TODO: list by priority
 # - REORGANIZE!
+# - port most logic to cpp
 
 """
 Optimization Log
@@ -49,11 +43,6 @@ Optimization Log
         cpp    : takes tokens, prev, post THEN makes occ,cur THEN does bpe merge
                  THEN sends final elements back to python
         python : takes final elements THEN serializes to json
-"""
-
-"""
-TEST RESULTS
-Passes all tests in 1.09s.
 """
 
 _WORKER_F: BinaryIO
@@ -112,62 +101,6 @@ CRE = re.compile(PAT)
 
 def special_try(special_tokens):
     return "|".join(re.escape(s) for s in sorted(special_tokens, key=len, reverse=True))
-
-
-BPE_VOCAB_JSON_FORMAT = "cs336_bpe_vocab_hex_v1"
-BPE_MERGES_JSON_FORMAT = "cs336_bpe_merges_hex_v1"
-
-
-def save_bpe_json(
-    vocab_output_path: str | os.PathLike,
-    merges_output_path: str | os.PathLike,
-    vocab: dict[int, bytes],
-    merges: list[tuple[bytes, bytes]],
-) -> None:
-    max_id = max(vocab) if vocab else -1
-    vocab_hex: list[str | None] = [None] * (max_id + 1)
-    for token_id, token_bytes in vocab.items():
-        vocab_hex[token_id] = token_bytes.hex()
-
-    if any(v is None for v in vocab_hex):
-        raise ValueError("vocab ids must be contiguous from 0..max_id")
-
-    vocab_payload = {
-        "format": BPE_VOCAB_JSON_FORMAT,
-        "vocab_hex": vocab_hex,
-    }
-    merges_payload = {
-        "format": BPE_MERGES_JSON_FORMAT,
-        "merges_hex": [[a.hex(), b.hex()] for a, b in merges],
-    }
-
-    with open(vocab_output_path, "w", encoding="utf-8") as f:
-        json.dump(vocab_payload, f, ensure_ascii=True)
-
-    with open(merges_output_path, "w", encoding="utf-8") as f:
-        json.dump(merges_payload, f, ensure_ascii=True)
-
-
-def load_bpe_json(
-    vocab_input_path: str | os.PathLike,
-    merges_input_path: str | os.PathLike,
-) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    with open(vocab_input_path, encoding="utf-8") as f:
-        vocab_payload = json.load(f)
-    with open(merges_input_path, encoding="utf-8") as f:
-        merges_payload = json.load(f)
-
-    if vocab_payload.get("format") != BPE_VOCAB_JSON_FORMAT:
-        raise ValueError(f"Unsupported vocab format: {vocab_payload.get('format')!r}")
-    if merges_payload.get("format") != BPE_MERGES_JSON_FORMAT:
-        raise ValueError(f"Unsupported merges format: {merges_payload.get('format')!r}")
-
-    vocab_hex = vocab_payload["vocab_hex"]
-    merges_hex = merges_payload["merges_hex"]
-
-    vocab = {i: bytes.fromhex(h) for i, h in enumerate(vocab_hex)}
-    merges = [(bytes.fromhex(a), bytes.fromhex(b)) for a, b in merges_hex]
-    return vocab, merges
 
 
 # it doesn't really matter what order we assemble the dataset in as long as
@@ -355,6 +288,182 @@ def train_bpe(
         a_id, b_id = unpack(k)
         return (_RevBytes(tok_bytes[a_id]), _RevBytes(tok_bytes[b_id]))
 
+    """
+    print("{DEBUG} Building heap...")
+    heap = [(-cnt, *_pair_key(k), k) for k, cnt in occ.items() if cnt > 0]
+    heapq.heapify(heap)
+    print("{DEBUG} Heap built...")
+
+    def next_key():
+        while heap:
+            neg_cnt, _, _, k = heap[0]
+            cnt = -neg_cnt
+            if occ.get(k, 0) != cnt:
+                heapq.heappop(heap)
+                continue
+            return k
+        return None
+
+    # merge logic
+    # a = prev[cr]
+    # b = cr
+    # l = prev[a]
+    # r = post[b]
+    # DISAPPEARANCES
+    # (L,A) disappears if L
+    # (A,B) disappears - best
+    # (B,R) disappears if R
+
+    merges = []
+
+    while n_curr < vocab_size:
+        # moved removing logic to function
+        best = next_key()
+        if best is None:
+            break
+
+        a_id, b_id = unpack(best)
+        working_dict[best] = n_curr
+        tok_bytes.append(tok_bytes[a_id] + tok_bytes[b_id])
+        touched = set()
+
+        # rewrite
+        # if l is valid
+        #   - create l key using tokens[prev[cr]]
+        #   - occ[k] = occ.get(k,0) + 1
+        #   - cur.setdefault(k, []).append(tokens[cr])
+
+        # ok we spamming comments bc
+        # im tired of looking at this and hating myself
+
+        # FOR EVERY OCCURENCE
+        for b in cur.get(best, []):
+            # PAIR IS (A,B)
+            # WE STORE RIGHT SIDE (B)
+            # SO WE NEED TO DERIVE A
+            a = prev[b]
+
+            # ALL the cases
+            # if a==U32_NONE --> a is the start of a word
+            # if a==U32_TOUCHED --> b has already been touched
+            if a >= U32_TOUCHED:
+                continue
+            # if  ==U32_TOUCHED --> a has already been touched
+            if prev[a] == U32_TOUCHED:
+                continue
+            # if  !=b  --> a was touched and b was ejected
+            if post[a] != b:
+                continue
+            # this one is basically if it has changed since we last saw
+            # not sure if this is possible anymore? should whiteboard
+            if tokens[a] != a_id or tokens[b] != b_id:
+                continue
+
+            l = prev[a]
+            r = post[b]
+
+            if l < U32_TOUCHED:
+                k = pack(tokens[l], tokens[a])
+                occ[k] = occ.get(k, 0) - 1
+                touched.add(k)
+
+            occ[best] = occ.get(best, 0) - 1
+            touched.add(best)
+
+            if r < U32_TOUCHED:
+                k = pack(tokens[b], tokens[r])
+                occ[k] = occ.get(k, 0) - 1
+                touched.add(k)
+
+            tokens[b] = n_curr
+            # tbh i think i could only use prev but im scared to change it
+            # bc it works now
+            prev[a] = U32_TOUCHED
+            post[a] = U32_TOUCHED
+
+            prev[b] = l if l < U32_TOUCHED else U32_NONE
+            if l < U32_TOUCHED:
+                post[l] = b
+
+            post[b] = r if r < U32_TOUCHED else U32_NONE
+            if r < U32_TOUCHED:
+                prev[r] = b
+
+            # HAS TO BE DONE AFTER EVERYTHING ELSE
+            if l < U32_TOUCHED:
+                k = pack(tokens[l], tokens[b])  # since we already changed [b]
+                occ[k] = occ.get(k, 0) + 1
+                arr = cur.get(k)
+                if arr is None:
+                    cur[k] = array("I", [b])
+                else:
+                    arr.append(b)
+                touched.add(k)
+
+            if r < U32_TOUCHED:
+                k = pack(tokens[b], tokens[r])
+                occ[k] = occ.get(k, 0) + 1
+                arr = cur.get(k)
+                if arr is None:
+                    cur[k] = array("I", [r])
+                else:
+                    arr.append(r)
+                touched.add(k)
+
+        for k in touched:
+            c = occ.get(k, 0)
+            if c <= 0:
+                occ.pop(k, None)
+                cur.pop(k, None)
+            else:
+                heapq.heappush(heap, (-c, *_pair_key(k), k))
+
+        merges.append(best)
+        cur.pop(best, None)
+        n_curr += 1
+        if n_curr % 10 == 0:
+            print(f"Merged: {n_curr} words")
+    """
+
+    # DEBUG
+    # thinking about merge structure
+    # we start from l side of merges array
+    # [12,25,39]...etc
+    # we unpack
+    # a_id, b_id = unpack(m)
+    # so example
+    # a_id, b_id = 1,2
+    # then we want to convert to bytes
+    # we can do it using the previous merges AND build dict at the same time
+
+    # check if a_id and b_id are in basic bytes dict (0-255)
+    # if yes, use bytes for remapping
+    # if not,
+    #       recursively unpack a_id and b_id until they are
+    #           add to dict so we dont have to do it again
+
+    # ok no recursion :(
+    """
+    with open("debug_merge.txt", "w", encoding="utf-8") as f:
+        final_dict = {i: bytes([i]) for i in range(0, 256)}
+
+        # LOW PRIORITY todo write into output (cuz memory overhead)
+        def bk_unpack(token_id: int) -> bytes:
+            if token_id in final_dict:
+                return final_dict[token_id]
+
+            packed = merges[token_id - fmerge]
+            a_id, b_id = unpack(packed)
+            a, b = bk_unpack(a_id), bk_unpack(b_id)
+            final_dict[token_id] = a + b
+            return final_dict[token_id]
+
+        for m in merges:
+            a_id, b_id = unpack(m)
+            out_merges.append((bk_unpack(a_id), bk_unpack(b_id)))
+            # f.write(f"a_id: {a_id}, b_id: {b_id} --> {out_merges[-1]}\n")
+    """
+
     merges = bpe_low.bpe_merge(
         tokens=tokens,
         prev=prev,
@@ -435,12 +544,26 @@ def find_chunk_boundaries(
 def main():
     from pathlib import Path
 
-    input_path = Path(__file__).resolve().parents[1] / "data" / "TinyStoriesV2-GPT4-valid.txt"
+    input_path = Path(__file__).resolve().parents[1] / "data" / "TinyStoriesV2-GPT4-train.txt"
     out_dict, out_merges = train_bpe(
-        str(input_path), 10000, ["<|endoftext|>"], workers=8
+        str(input_path), 10000, ["<|endoftext|>"], workers=6
     )
 
-    save_bpe_json("out_vocab.json", "out_merges.json", out_dict, out_merges)
+    import json
+
+    def _bytes_to_hex(b: bytes) -> str:
+        return b.hex()
+
+    def _bytes_to_str(b: bytes) -> str:
+        return b.decode("utf-8", errors="backslashreplace")
+
+    out_dict_json = {str(k): _bytes_to_hex(v) for k, v in out_dict.items()}
+    out_merges_json = [[_bytes_to_str(a), _bytes_to_str(b)] for a, b in out_merges]
+
+    with open("out_dict.json", "w", encoding="utf-8") as json_file:
+        json.dump(
+            {"vocab": out_dict_json, "merges": out_merges_json}, json_file, indent=2
+        )
 
 if __name__ == "__main__":
     main()
