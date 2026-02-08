@@ -1,5 +1,6 @@
 """
 my main focus right now is implementing the transformer
+will work on optimizations later maybe!
 """
 
 import math
@@ -221,8 +222,67 @@ class SwiGLU(nn.Module):
         a = einsum(x, self.w1, "... d, f d -> ... f")
         b = einsum(x, self.w3, "... d, f d -> ... f")
 
-        g = _silu(b)
+        h = _silu(a) * b
         # hamandodiica something idk the (.) sign
-        h = einsum(a, g, "... f, ... f -> ... f")
 
         return einsum(h, self.w2, "... f, d f -> ... d")
+
+
+class RotaryPositionalEmbedding(nn.Module):
+    def __init__(
+        self,
+        theta: float,
+        d_k: int,
+        max_seq_len: int,
+        device: torch.device | None = None,
+    ):
+        super().__init__()
+        self.theta = theta
+        self.d_k = d_k
+        self.max_seq_len = max_seq_len
+
+        inv_freq = 1.0 / (theta ** (torch.arange(0, d_k, 2).float() / d_k))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+        self.register_buffer("cos_cached", torch.empty(0), persistent=False)
+        self.register_buffer("sin_cached", torch.empty(0), persistent=False)
+        self._build_cache(max_seq_len=max_seq_len, device=device)
+
+    def _build_cache(self, max_seq_len: int, device: torch.device | None):
+        # makes tensor up to max_seq_len
+        if device is None:
+            device = self.inv_freq.device
+
+        t = torch.arange(max_seq_len, device=device, dtype=torch.float32)
+        inv = self.inv_freq.to(device=device, dtype=torch.float32)
+        freq = torch.outer(t, self.inv_freq.to(device=device, dtype=torch.float32))
+
+        self.cos_cached = freq.cos()
+        self.sin_cached = freq.sin()
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        """
+        x: [..., seq_len, d_k]
+        token_positions: [..., seq_len]
+        """
+
+        pos = token_positions.to(device=x.device, dtype=torch.long)
+        need = int(pos.max().item()) + 1
+
+        # if get issues potentially check if device conflicts
+        if (self.cos_cached.device != x.device) or (self.cos_cached.size(0) < need):
+            self._build_cache(max_seq_len=need, device=x.device)
+
+        cos = self.cos_cached[pos].to(dtype=x.dtype)
+        sin = self.sin_cached[pos].to(dtype=x.dtype)
+
+        x_even, x_odd = x[..., 0::2], x[..., 1::2]
+
+        out_even = x_even * cos - x_odd * sin
+        out_odd = x_even * sin + x_odd * cos
+
+        out = torch.empty_like(x)
+        out[..., 0::2] = out_even
+        out[..., 1::2] = out_odd
+
+        return out
